@@ -9,7 +9,6 @@ from typing import Optional, List, Dict, Tuple
 import requests
 import pandas as pd
 import numpy as np
-import ccxt  # type: ignore
 
 # ====== Robust .env loader ======
 def _read_env_file(path: Path) -> dict:
@@ -128,46 +127,43 @@ def tg_send(cfg: Config, text: str) -> None:
 
 # ====== Exchange ======
 class Ex:
+    """Minimal Binance futures API wrapper for fetching market data."""
+
     def __init__(self, cfg: Config):
-        cls = getattr(ccxt, cfg.exchange_id)
-        self.x = cls({
-            "options": {"defaultType": "future", "adjustForTimeDifference": cfg.adjust_time_diff},
-            "enableRateLimit": True,
-            "timeout": 20000,
-        })
-        try:
-            if hasattr(self.x, "load_time_difference"):
-                self.x.load_time_difference()
-        except Exception:
-            pass
-        self.x.load_markets(params={"type": "future", "skipFetchCurrencies": True})
+        self.base = "https://fapi.binance.com"
 
     def top_usdt_perps(self, n: int) -> List[str]:
         try:
-            tickers = self.x.fetch_tickers()
+            r = requests.get(f"{self.base}/fapi/v1/ticker/24hr", timeout=10)
+            r.raise_for_status()
+            tickers = r.json()
         except Exception as e:
-            print(f"[EX_ERROR] fetch_tickers: {e}")
+            print(f"[EX_ERROR] ticker24hr: {e}")
             return ["BTC/USDT", "ETH/USDT"]
-        rows: List[Tuple[str,float]] = []
-        for sym, t in tickers.items():
-            try:
-                m = self.x.markets.get(sym) or self.x.market(sym)
-            except Exception:
+        rows: List[Tuple[str, float]] = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if not sym.endswith("USDT"):
                 continue
-            if not m.get("swap", False):
+            if t.get("contractType") and t.get("contractType") != "PERPETUAL":
                 continue
-            if m.get("quote") != "USDT":
-                continue
-            vol = t.get("quoteVolume", 0) or t.get("baseVolume", 0) or 0
-            rows.append((m["symbol"], float(vol)))
+            vol = float(t.get("quoteVolume") or 0)
+            rows.append((sym[:-4] + "/USDT", vol))
         rows.sort(key=lambda r: r[1], reverse=True)
         return [s for s, _ in rows[:n]]
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        raw = self.x.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(raw, columns=["ts","open","high","low","close","vol"])
+        sym = symbol.replace("/", "")
+        params = {"symbol": sym, "interval": timeframe, "limit": limit}
+        r = requests.get(f"{self.base}/fapi/v1/klines", params=params, timeout=10)
+        r.raise_for_status()
+        raw = r.json()
+        df = pd.DataFrame(
+            [[k[0], k[1], k[2], k[3], k[4], k[5]] for k in raw],
+            columns=["ts", "open", "high", "low", "close", "vol"],
+        )
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-        return df
+        return df.astype({"open": float, "high": float, "low": float, "close": float, "vol": float})
 
 # ====== Indicator utils ======
 def atr(df: pd.DataFrame, n: int=14) -> pd.Series:
