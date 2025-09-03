@@ -64,7 +64,6 @@ class Config:
     telegram_token: Optional[str] = _normalize(os.environ.get("TG_TOKEN"))
     telegram_chat_id: Optional[str] = _normalize(os.environ.get("TG_CHAT"))
     strategy: str = ""   # set per bot
-    poll_secs: int = 60  # scan every ~60s
 
 # ====== Telegram helpers ======
 def tg_api(cfg: Config, method: str, **params) -> Tuple[bool, dict]:
@@ -258,7 +257,6 @@ def run_forever(cfg: Config) -> None:
     tg_self_test(cfg)
 
     while True:
-        cycle_start = time.time()
         try:
             syms = ex.top_usdt_perps(cfg.top_n)
             open_count = len(open_pos)
@@ -335,7 +333,6 @@ def run_forever(cfg: Config) -> None:
         except Exception as e:
             print(f"[ERR] loop: {e}")
 
-        time.sleep(max(0.0, cfg.poll_secs - (time.time() - cycle_start)))
 
 if __name__ == "__main__":
     cfg = Config(strategy=STRAT_NAME)
