@@ -59,12 +59,11 @@ class Config:
     timeframe: str = "15m"
     lookback: int = 400
     top_n: int = 20
-    exchange_id: str = "binanceusdm"
+    exchange_id: str = "krakenfutures"
     adjust_time_diff: bool = True
     telegram_token: Optional[str] = _normalize(os.environ.get("TG_TOKEN"))
     telegram_chat_id: Optional[str] = _normalize(os.environ.get("TG_CHAT"))
     strategy: str = ""   # set per bot
-    poll_secs: int = 60  # scan every ~60s
 
 # ====== Telegram helpers ======
 def tg_api(cfg: Config, method: str, **params) -> Tuple[bool, dict]:
@@ -127,41 +126,47 @@ def tg_send(cfg: Config, text: str) -> None:
 
 # ====== Exchange ======
 class Ex:
-    """Minimal Binance futures API wrapper for fetching market data."""
+    """Minimal Kraken Futures API wrapper for fetching market data."""
 
     def __init__(self, cfg: Config):
-        self.base = "https://fapi.binance.com"
+        self.base = "https://futures.kraken.com/derivatives/api/v3"
+
+    def _to_symbol(self, pair: str) -> str:
+        base, quote = pair.split("/")
+        if base.upper() == "BTC":
+            base = "XBT"
+        return f"pf_{base.lower()}{quote.lower()}"
 
     def top_usdt_perps(self, n: int) -> List[str]:
         try:
-            r = requests.get(f"{self.base}/fapi/v1/ticker/24hr", timeout=10)
+            r = requests.get(f"{self.base}/tickers", timeout=10)
             r.raise_for_status()
-            tickers = r.json()
+            tickers = r.json().get("tickers", [])
         except Exception as e:
-            print(f"[EX_ERROR] ticker24hr: {e}")
+            print(f"[EX_ERROR] tickers: {e}")
             return ["BTC/USDT", "ETH/USDT"]
         rows: List[Tuple[str, float]] = []
         for t in tickers:
-            sym = t.get("symbol", "")
-            if not sym.endswith("USDT"):
+            pair = t.get("pair") or t.get("symbol", "").upper()
+            if "USDT" not in pair.upper():
                 continue
-            if t.get("contractType") and t.get("contractType") != "PERPETUAL":
+            if t.get("tag") and t.get("tag") != "perpetual":
                 continue
-            vol = float(t.get("quoteVolume") or 0)
-            rows.append((sym[:-4] + "/USDT", vol))
+            vol = float(t.get("vol24h") or 0)
+            rows.append((pair.replace(":", "/"), vol))
         rows.sort(key=lambda r: r[1], reverse=True)
         return [s for s, _ in rows[:n]]
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        sym = symbol.replace("/", "")
-        params = {"symbol": sym, "interval": timeframe, "limit": limit}
-        r = requests.get(f"{self.base}/fapi/v1/klines", params=params, timeout=10)
+        res_map = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+        resolution = res_map.get(timeframe, 1)
+        ks = self._to_symbol(symbol)
+        params = {"symbol": ks, "resolution": resolution}
+        r = requests.get(f"{self.base}/ohlc", params=params, timeout=10)
         r.raise_for_status()
-        raw = r.json()
-        df = pd.DataFrame(
-            [[k[0], k[1], k[2], k[3], k[4], k[5]] for k in raw],
-            columns=["ts", "open", "high", "low", "close", "vol"],
-        )
+        raw = r.json().get("candles", [])[-limit:]
+        df = pd.DataFrame(raw)[["time", "open", "high", "low", "close", "volume"]]
+        df.columns = ["ts", "open", "high", "low", "close", "vol"]
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
         return df.astype({"open": float, "high": float, "low": float, "close": float, "vol": float})
 
@@ -252,7 +257,6 @@ def run_forever(cfg: Config) -> None:
     tg_self_test(cfg)
 
     while True:
-        cycle_start = time.time()
         try:
             syms = ex.top_usdt_perps(cfg.top_n)
             open_count = len(open_pos)
@@ -329,7 +333,6 @@ def run_forever(cfg: Config) -> None:
         except Exception as e:
             print(f"[ERR] loop: {e}")
 
-        time.sleep(max(0.0, cfg.poll_secs - (time.time() - cycle_start)))
 
 if __name__ == "__main__":
     cfg = Config(strategy=STRAT_NAME)
